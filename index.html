@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Painel Financeiro - Imóveis e Carros</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
+  header { padding: 20px 24px; background: #1e293b; border-bottom: 1px solid #334155; }
+  h1 { margin: 0 0 12px 0; font-size: 22px; }
+  .entrada { display: flex; gap: 8px; flex-wrap: wrap; }
+  .entrada input { flex: 1; min-width: 260px; padding: 10px; border-radius: 6px; border: 1px solid #475569; background: #0f172a; color: #e2e8f0; }
+  button { padding: 10px 18px; border: 0; border-radius: 6px; background: #22c55e; color: #052e16; font-weight: bold; cursor: pointer; }
+  button:hover { background: #16a34a; }
+  #status { margin-top: 8px; font-size: 13px; color: #94a3b8; }
+  main { padding: 24px; display: none; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .card { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 14px; }
+  .card span { display: block; font-size: 12px; color: #94a3b8; margin-bottom: 6px; }
+  .card strong { font-size: 20px; }
+  .positivo { color: #4ade80; }
+  .filtros { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; align-items: center; }
+  .filtros label { font-size: 13px; color: #94a3b8; }
+  .filtros select { padding: 8px; border-radius: 6px; border: 1px solid #475569; background: #0f172a; color: #e2e8f0; }
+  .graficos { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .graficos .caixa { background: #1e293b; border: 1px solid #334155; border-radius: 10px; padding: 14px; }
+  h2 { font-size: 16px; margin: 0 0 10px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; background: #1e293b; border-radius: 10px; overflow: hidden; margin-bottom: 24px; }
+  th, td { padding: 8px 10px; text-align: right; border-bottom: 1px solid #334155; }
+  th:first-child, td:first-child { text-align: left; }
+  th { background: #334155; font-weight: normal; color: #cbd5e1; }
+  .tabela-wrap { overflow-x: auto; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Painel Financeiro: Imóveis e Carros</h1>
+  <div class="entrada">
+    <input id="link" type="text" autocomplete="off" placeholder="Cole aqui o link da planilha do Google Sheets">
+    <button id="processar">Processar</button>
+  </div>
+  <div id="status">A planilha precisa estar compartilhada por link, em modo leitura.</div>
+</header>
+
+<main id="painel">
+  <div class="cards" id="cards"></div>
+
+  <div class="filtros">
+    <label>Imóvel: <select id="filtroImovel"></select></label>
+    <label>Rendimento anual mínimo: <select id="filtroRend">
+      <option value="0">Todos</option>
+      <option value="0.12">Acima de 12% (LCI)</option>
+      <option value="0.25">Acima de 25%</option>
+      <option value="0.5">Acima de 50%</option>
+    </select></label>
+  </div>
+
+  <div class="graficos">
+    <div class="caixa"><h2>Rendimento anual por imóvel (%) comparado à LCI</h2><canvas id="gRend"></canvas></div>
+    <div class="caixa"><h2>Receita anual líquida por imóvel (R$)</h2><canvas id="gReceita"></canvas></div>
+    <div class="caixa"><h2>Carros: compra, venda e lucro (R$)</h2><canvas id="gCarros"></canvas></div>
+    <div class="caixa"><h2>Imóvel: valor encaixado x valor de mercado (R$)</h2><canvas id="gAgio"></canvas></div>
+  </div>
+
+  <h2>Imóveis</h2>
+  <div class="tabela-wrap"><table id="tImoveis"></table></div>
+  <h2>Carros convertidos em imóveis</h2>
+  <div class="tabela-wrap"><table id="tCarros"></table></div>
+</main>
+
+<script>
+const TAXA_LCI = 0.12;
+let dadosImoveis = [], dadosCarros = [], graficos = {};
+
+const esc = s => String(s === undefined || s === null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const brl = v => (isNaN(v) ? '-' : Number(v).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }));
+const pct = v => (isNaN(v) ? '-' : (Number(v) * 100).toFixed(1).replace('.', ',') + '%');
+
+function idDaPlanilha(link) {
+  const m = link.match(/\/d\/([a-zA-Z0-9-_]+)/);
+  if (m) return m[1];
+  return /^[a-zA-Z0-9-_]{25,}$/.test(link) ? link : null;
+}
+
+function lerCSV(texto) {
+  const linhas = [];
+  let campo = '', linha = [], aspas = false;
+  for (let i = 0; i < texto.length; i++) {
+    const c = texto[i];
+    if (aspas) {
+      if (c === '"' && texto[i + 1] === '"') { campo += '"'; i++; }
+      else if (c === '"') aspas = false;
+      else campo += c;
+    } else if (c === '"') aspas = true;
+    else if (c === ',') { linha.push(campo); campo = ''; }
+    else if (c === '\n') { linha.push(campo); linhas.push(linha); linha = []; campo = ''; }
+    else if (c !== '\r') campo += c;
+  }
+  if (campo !== '' || linha.length) { linha.push(campo); linhas.push(linha); }
+  return linhas;
+}
+
+function numero(s) {
+  if (s === undefined || s === null) return NaN;
+  const ehPct = String(s).includes('%');
+  let t = String(s).replace(/R\$/g, '').replace(/[\s\u00a0]/g, '').replace(/%/g, '');
+  if (t === '') return NaN;
+  if (t.includes(',')) t = t.replace(/\./g, '').replace(',', '.');
+  else if (/^-?\d{1,3}(\.\d{3})+$/.test(t)) t = t.replace(/\./g, '');
+  const n = parseFloat(t);
+  return ehPct ? n / 100 : n;
+}
+
+async function buscarAba(id, aba) {
+  const url = 'https://docs.google.com/spreadsheets/d/' + id + '/gviz/tq?tqx=out:csv&sheet=' + encodeURIComponent(aba);
+  const r = await fetch(url, { cache: 'no-store', credentials: 'omit' });
+  if (!r.ok) throw new Error('Não consegui ler a aba ' + aba);
+  const texto = await r.text();
+  if (/^\s*</.test(texto)) throw new Error('Planilha não compartilhada');
+  return lerCSV(texto).slice(1).filter(l => l[0] && l[0].trim() !== '');
+}
+
+async function processar() {
+  const status = document.getElementById('status');
+  const id = idDaPlanilha(document.getElementById('link').value.trim());
+  if (!id) { status.textContent = 'Link inválido. Cole o endereço completo da planilha.'; return; }
+  status.textContent = 'Lendo a planilha...';
+  try {
+    const [im, ca] = await Promise.all([buscarAba(id, 'Página1'), buscarAba(id, 'Carros')]);
+    dadosImoveis = im.map(l => ({
+      nome: l[0], compra: numero(l[1]), manut: numero(l[2]), investido: numero(l[3]),
+      aluguel: numero(l[4]), vagos: numero(l[5]), receita: numero(l[6]),
+      rendMes: numero(l[7]), rendAno: numero(l[8]), mercado: numero(l[9])
+    }));
+    dadosCarros = ca.map(l => ({
+      nome: l[0], compra: numero(l[1]), gastos: numero(l[2]), venda: numero(l[3]),
+      lucro: numero(l[4]), lucroPct: numero(l[5]), encaixado: numero(l[6]),
+      imovel: l[7], mercado: numero(l[8]), ganho: numero(l[9])
+    }));
+  } catch (e) {
+    status.textContent = 'Erro ao ler. Confira se a planilha está compartilhada por link (leitura) e se as abas se chamam Página1 e Carros.';
+    return;
+  }
+  status.textContent = 'Planilha carregada: ' + dadosImoveis.length + ' imóveis e ' + dadosCarros.length + ' carros.';
+  document.getElementById('painel').style.display = 'block';
+  montarFiltros();
+  desenhar();
+  if (typeof Chart === 'undefined') status.textContent += ' (Os gráficos não carregaram: verifique a internet e recarregue a página.)';
+}
+
+function montarFiltros() {
+  const sel = document.getElementById('filtroImovel');
+  sel.innerHTML = '<option value="">Todos</option>' +
+    dadosImoveis.map(i => '<option value="' + esc(i.nome) + '">' + esc(i.nome) + '</option>').join('');
+}
+
+function soma(arr, campo) {
+  return arr.reduce((t, x) => t + (isNaN(x[campo]) ? 0 : x[campo]), 0);
+}
+
+function desenhar() {
+  const fImovel = document.getElementById('filtroImovel').value;
+  const fRend = parseFloat(document.getElementById('filtroRend').value);
+  const im = dadosImoveis.filter(i => (!fImovel || i.nome === fImovel) && (isNaN(i.rendAno) ? 0 : i.rendAno) >= fRend);
+  const ca = dadosCarros.filter(c => !fImovel || c.imovel === fImovel);
+
+  const investido = soma(im, 'investido');
+  const receita = soma(im, 'receita');
+  const mercado = soma(im, 'mercado');
+  const lucroCarros = soma(ca, 'lucro');
+  const ganhoPatr = soma(ca, 'ganho');
+  const rendMedio = investido > 0 ? receita / investido : NaN;
+
+  document.getElementById('cards').innerHTML = [
+    ['Total investido nos imóveis', brl(investido), ''],
+    ['Valor de mercado dos imóveis', brl(mercado), ''],
+    ['Receita anual líquida', brl(receita), 'positivo'],
+    ['Rendimento médio anual', pct(rendMedio), rendMedio > TAXA_LCI ? 'positivo' : ''],
+    ['Lucro com carros', brl(lucroCarros), 'positivo'],
+    ['Ganho de patrimônio (ágio)', brl(ganhoPatr), 'positivo']
+  ].map(c => '<div class="card"><span>' + esc(c[0]) + '</span><strong class="' + c[2] + '">' + c[1] + '</strong></div>').join('');
+
+  graficoBarras('gRend', im.map(i => i.nome), [
+    { label: 'Rendimento anual (%)', data: im.map(i => (i.rendAno || 0) * 100), backgroundColor: '#22c55e' },
+    { label: 'LCI (12%)', data: im.map(() => TAXA_LCI * 100), backgroundColor: '#64748b' }
+  ]);
+  graficoBarras('gReceita', im.map(i => i.nome), [
+    { label: 'Receita anual líquida', data: im.map(i => i.receita || 0), backgroundColor: '#38bdf8' }
+  ]);
+  graficoBarras('gCarros', ca.map(c => c.nome), [
+    { label: 'Compra + gastos', data: ca.map(c => (c.compra || 0) + (c.gastos || 0)), backgroundColor: '#f97316' },
+    { label: 'Venda', data: ca.map(c => c.venda || 0), backgroundColor: '#38bdf8' },
+    { label: 'Lucro', data: ca.map(c => c.lucro || 0), backgroundColor: '#22c55e' }
+  ]);
+  graficoBarras('gAgio', ca.map(c => c.imovel || c.nome), [
+    { label: 'Valor encaixado', data: ca.map(c => c.encaixado || 0), backgroundColor: '#f97316' },
+    { label: 'Valor de mercado', data: ca.map(c => c.mercado || 0), backgroundColor: '#22c55e' }
+  ]);
+
+  tabela('tImoveis',
+    ['Imóvel', 'Compra', 'Manutenção', 'Investido', 'Aluguel/mês', 'Meses vagos', 'Receita anual', 'Rend. mês', 'Rend. ano', 'Mercado'],
+    im.map(i => [i.nome, brl(i.compra), brl(i.manut), brl(i.investido), brl(i.aluguel), (isNaN(i.vagos) ? '-' : i.vagos), brl(i.receita), pct(i.rendMes), pct(i.rendAno), brl(i.mercado)]));
+  tabela('tCarros',
+    ['Carro', 'Compra', 'Gastos', 'Venda', 'Lucro', 'Lucro %', 'Encaixado', 'Imóvel', 'Mercado', 'Ganho'],
+    ca.map(c => [c.nome, brl(c.compra), brl(c.gastos), brl(c.venda), brl(c.lucro), pct(c.lucroPct), brl(c.encaixado), c.imovel, brl(c.mercado), brl(c.ganho)]));
+}
+
+function graficoBarras(id, rotulos, datasets) {
+  if (typeof Chart === 'undefined') return;
+  if (graficos[id]) graficos[id].destroy();
+  graficos[id] = new Chart(document.getElementById(id), {
+    type: 'bar',
+    data: { labels: rotulos, datasets: datasets },
+    options: {
+      plugins: { legend: { labels: { color: '#e2e8f0' } } },
+      scales: {
+        x: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' } },
+        y: { ticks: { color: '#94a3b8' }, grid: { color: '#334155' } }
+      }
+    }
+  });
+}
+
+function tabela(id, cabecalho, linhas) {
+  document.getElementById(id).innerHTML =
+    '<tr>' + cabecalho.map(h => '<th>' + esc(h) + '</th>').join('') + '</tr>' +
+    linhas.map(l => '<tr>' + l.map(c => '<td>' + esc(c) + '</td>').join('') + '</tr>').join('');
+}
+
+document.getElementById('processar').addEventListener('click', processar);
+document.getElementById('filtroImovel').addEventListener('change', desenhar);
+document.getElementById('filtroRend').addEventListener('change', desenhar);
+</script>
+</body>
+</html>
